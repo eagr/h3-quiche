@@ -1,0 +1,2 @@
+*.rs filter=trimWhitespace
+* text=auto eol=lf

@@ -1,0 +1,22 @@
+[package]
+publish = false
+name = "h3-quiche"
+version = "0.0.0"
+edition = "2021"
+description = "h3 over quiche"
+authors = ["Julian Eager <eagr@tutanota.com>"]
+license = "MIT OR Apache-2.0"
+categories = ["network-programming"]
+keywords = ["quic", "http3"]
+readme = "README.md"
+repository = "https://github.com/eagr/h3-quiche"
+include = [
+    "/src",
+    "/*.md",
+    "/LICENSE-*",
+]
+
+[dependencies]
+bytes = "1.3"
+h3 = { git = "https://github.com/hyperium/h3" }
+quiche = "0.16"
