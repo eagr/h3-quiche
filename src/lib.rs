@@ -26,9 +26,9 @@ pub struct Connection {
 }
 
 impl Connection {
-    pub fn new(conn: quiche::Connection) -> Self {
+    pub fn new(conn: Arc<Mutex<quiche::Connection>>) -> Self {
         Self {
-            conn: Arc::new(Mutex::new(conn)),
+            conn,
             client_stream_id: Arc::new(ClientStreamId::new()),
             server_stream_id: Arc::new(ServerStreamId::new()),
         }
