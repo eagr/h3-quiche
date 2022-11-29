@@ -9,28 +9,18 @@ use std::{
 use bytes::{Buf, Bytes};
 use h3::quic::{self, StreamId, WriteBuf};
 
-// When using quiche, the only way to access a stream is the
-// combination of connection and stream id.
-// In quiche, stream info is encoded in the stream id.
-// * If the stream id is a multiple of 4, it is a bidirectional
-//   stream.
-// * Otherwise, it is a unidirectional stream.
-//     - If the id is odd and the endpoint is a server, it is created
-//       locally.
-//     - If the id is even and the endpoint is a client, it is
-//       created locally.
 pub struct Connection {
     conn: Arc<Mutex<quiche::Connection>>,
-    client_stream_id: Arc<ClientStreamId>,
-    server_stream_id: Arc<ServerStreamId>,
+    bi_stream_id: Arc<NextStreamId>,
+    uni_stream_id: Arc<NextStreamId>,
 }
 
 impl Connection {
-    pub fn new(conn: Arc<Mutex<quiche::Connection>>) -> Self {
+    pub fn new(conn: Arc<Mutex<quiche::Connection>>, is_server: bool) -> Self {
         Self {
             conn,
-            client_stream_id: Arc::new(ClientStreamId::new()),
-            server_stream_id: Arc::new(ServerStreamId::new()),
+            bi_stream_id: Arc::new(NextStreamId::new(true, !is_server)),
+            uni_stream_id: Arc::new(NextStreamId::new(false, !is_server)),
         }
     }
 }
@@ -46,7 +36,7 @@ impl<B: Buf> quic::Connection<B> for Connection {
         &mut self,
         _cx: &mut Context<'_>,
     ) -> Poll<Result<Self::BidiStream, Self::Error>> {
-        let id = self.client_stream_id.next(true);
+        let id = self.bi_stream_id.next();
         Poll::Ready(
             self.conn
                 .lock()
@@ -66,7 +56,7 @@ impl<B: Buf> quic::Connection<B> for Connection {
         &mut self,
         _cx: &mut Context<'_>,
     ) -> Poll<Result<Self::SendStream, Self::Error>> {
-        let id = self.client_stream_id.next(false);
+        let id = self.uni_stream_id.next();
         Poll::Ready(
             self.conn
                 .lock()
@@ -105,7 +95,11 @@ impl<B: Buf> quic::Connection<B> for Connection {
     }
 
     fn opener(&self) -> Self::OpenStreams {
-        OpenStreams::new(self.conn.clone(), self.client_stream_id.clone())
+        OpenStreams::new(
+            self.conn.clone(),
+            self.uni_stream_id.clone(),
+            self.bi_stream_id.clone(),
+        )
     }
 
     fn close(&mut self, code: h3::error::Code, reason: &[u8]) {
@@ -113,66 +107,74 @@ impl<B: Buf> quic::Connection<B> for Connection {
     }
 }
 
-struct ClientStreamId {
-    next_id: AtomicU64,
+struct NextStreamId {
+    id: AtomicU64,
 }
 
-impl ClientStreamId {
-    fn new() -> Self {
+//= https://www.rfc-editor.org/rfc/rfc9000#section-2.1
+//# The least significant bit (0x01) of the stream ID identifies the
+//# initiator of the stream.  Client-initiated streams have even-numbered
+//# stream IDs (with the bit set to 0), and server-initiated streams have
+//# odd-numbered stream IDs (with the bit set to 1).
+//#
+//# The second least significant bit (0x02) of the stream ID
+//# distinguishes between bidirectional streams (with the bit set to 0)
+//# and unidirectional streams (with the bit set to 1).
+//#
+//# The two least significant bits from a stream ID therefore identify a
+//# stream as one of four types, as summarized in Table 1.
+//#
+//#              +======+==================================+
+//#              | Bits | Stream Type                      |
+//#              +======+==================================+
+//#              | 0x00 | Client-Initiated, Bidirectional  |
+//#              +------+----------------------------------+
+//#              | 0x01 | Server-Initiated, Bidirectional  |
+//#              +------+----------------------------------+
+//#              | 0x02 | Client-Initiated, Unidirectional |
+//#              +------+----------------------------------+
+//#              | 0x03 | Server-Initiated, Unidirectional |
+//#              +------+----------------------------------+
+impl NextStreamId {
+    fn new(is_bidi: bool, is_client: bool) -> Self {
         Self {
-            next_id: AtomicU64::new(0),
-        }
-    }
-
-    fn next(&self, is_bidi: bool) -> u64 {
-        let maybe_id = self.fetch_add_id();
-        if is_bidi {
-            if maybe_id % 0x4 == 0 {
-                maybe_id
+            id: AtomicU64::new(if is_bidi {
+                if is_client {
+                    0
+                } else {
+                    1
+                }
             } else {
-                self.fetch_add_id()
-            }
-        } else {
-            if maybe_id % 0x4 == 0 {
-                self.fetch_add_id()
-            } else {
-                maybe_id
-            }
-        }
-    }
-
-    #[inline]
-    fn fetch_add_id(&self) -> u64 {
-        self.next_id.fetch_add(2, Ordering::SeqCst)
-    }
-}
-
-struct ServerStreamId {
-    next_id: AtomicU64,
-}
-
-impl ServerStreamId {
-    fn new() -> Self {
-        Self {
-            next_id: AtomicU64::new(1),
+                if is_client {
+                    2
+                } else {
+                    3
+                }
+            }),
         }
     }
 
     fn next(&self) -> u64 {
-        self.next_id.fetch_add(2, Ordering::SeqCst)
+        self.id.fetch_add(4, Ordering::SeqCst)
     }
 }
 
 pub struct OpenStreams {
     conn: Arc<Mutex<quiche::Connection>>,
-    client_stream_id: Arc<ClientStreamId>,
+    uni_stream_id: Arc<NextStreamId>,
+    bi_stream_id: Arc<NextStreamId>,
 }
 
 impl OpenStreams {
-    fn new(conn: Arc<Mutex<quiche::Connection>>, client_stream_id: Arc<ClientStreamId>) -> Self {
+    fn new(
+        conn: Arc<Mutex<quiche::Connection>>,
+        uni_stream_id: Arc<NextStreamId>,
+        bi_stream_id: Arc<NextStreamId>,
+    ) -> Self {
         Self {
             conn,
-            client_stream_id,
+            uni_stream_id,
+            bi_stream_id,
         }
     }
 }
@@ -187,7 +189,7 @@ impl<B: Buf> quic::OpenStreams<B> for OpenStreams {
         &mut self,
         _cx: &mut Context<'_>,
     ) -> Poll<Result<Self::BidiStream, Self::Error>> {
-        let id = self.client_stream_id.next(true);
+        let id = self.bi_stream_id.next();
         Poll::Ready(
             self.conn
                 .lock()
@@ -207,7 +209,7 @@ impl<B: Buf> quic::OpenStreams<B> for OpenStreams {
         &mut self,
         _cx: &mut Context<'_>,
     ) -> Poll<Result<Self::SendStream, Self::Error>> {
-        let id = self.client_stream_id.next(false);
+        let id = self.uni_stream_id.next();
         Poll::Ready(
             self.conn
                 .lock()
