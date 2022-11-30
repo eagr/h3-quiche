@@ -1,3 +1,7 @@
+*.crt
+*.key
+*.pem
+
 # Cargo
 Cargo.lock
 debug/
